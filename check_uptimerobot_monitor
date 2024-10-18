@@ -1,0 +1,140 @@
+#!/bin/bash
+
+# check_uptimerobot_monitor Checks UptimeRobot monitor status
+# Copyright (C) 2024 Ramón Román Castro <ramonromancastro@gmail.com>
+# 
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+# 
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+# 
+# You should have received a copy of the GNU General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+# Constants
+
+PLUGIN_VERSION=0.3
+API_MONITOR_URL="https://api.uptimerobot.com/v2/getMonitors"
+NAGIOS_OK=0
+NAGIOS_WARNING=1
+NAGIOS_CRITICAL=2
+NAGIOS_UNKNOWN=3
+
+# Global Variables
+
+api_key=
+monitor_id=
+messages=()
+
+plugin_verbose=false
+
+# Nagios Plugins
+
+return_code=$NAGIOS_OK
+nwarning=0
+ncritical=0
+nunknown=0
+
+# Helper Functions
+
+verb() {
+    [ "$plugin_verbose" = true ] && echo "$1"
+}
+
+show_version() {
+    echo "$(basename "$0") v$PLUGIN_VERSION"
+    exit $NAGIOS_OK
+}
+
+show_help() {
+    echo "Usage: $(basename "$0") -a <api-key> [-m <monitor>] [-v] [-V] [-h]"
+    echo "  -a  API Key (required)"
+    echo "  -m  Monitor ID (optional)"
+    echo "  -v  Verbose (optional)"
+    echo "  -V  Version (optional)"
+    echo "  -h  Help (optional)"
+    exit $NAGIOS_OK
+}
+
+# Read and Validate Parameters
+
+while getopts ":a:m:vVh" opt; do
+    case $opt in
+        a) api_key="$OPTARG" ;;
+        m) monitor_id="&monitors=$OPTARG" ;;
+        v) plugin_verbose=true ;;
+        V) show_version ;;
+        h) show_help ;;
+        \?) echo "Invalid option: -$OPTARG" >&2; show_help ;;
+        :)  echo "Option -$OPTARG requires an argument." >&2; show_help ;;
+    esac
+done
+
+[ -z "$api_key" ] && { echo "API key is required." >&2; show_help; }
+
+# Make the POST request and capture the response
+
+verb "Retrieving monitor information from UptimeRobot"
+response=$(curl -s -w "%{http_code}" -X POST -H "Content-Type: application/x-www-form-urlencoded" -H "Cache-Control: no-cache" -d "api_key=$api_key&format=json$monitor_id" "$API_MONITOR_URL")
+http_code="${response: -3}"
+json="${response:0:${#response}-3}"
+
+# Check the HTTP status code
+
+if [ "$http_code" -eq 200 ]; then
+    # Store values in the array
+
+    while IFS= read -r line; do
+        monitors+=("$line")
+    done < <(echo "$json" | jq -r '.monitors[] | "\(.url) \(.status)"' | sort)
+
+    # Loop through the array
+
+    for entry in "${monitors[@]}"; do
+        url=$(echo "$entry" | awk '{print $1}')
+        status=$(echo "$entry" | awk '{print $2}')
+        verb "Processing $url"
+        case $status in
+            0) messages+=("Paused: $url") ;;
+            1) messages+=("Not checked yet: $url") ;;
+            2) messages+=("Ok: $url") ;;                     
+            8) nwarning=$((nwarning + 1)); messages+=("Seems down: $url") ;;
+            9) ncritical=$((ncritical + 1)); messages+=("Down: $url") ;;
+            *) nunknown=$((nunknown + 1)); messages+=("Unknown: $url") ;;
+        esac
+    done   
+elif [ "$http_code" -eq 429 ]; then
+    echo "Unknown: Rate limit reached"
+    exit $NAGIOS_UNKNOWN
+else
+    echo "Unknown: Unable to fetch data"
+    exit $NAGIOS_UNKNOWN
+fi
+
+# Print the header
+
+if [ "$ncritical" -ne 0 ]; then
+    echo "Critical: $ncritical monitor(s) are down"
+    return_code=$NAGIOS_CRITICAL
+elif [ "$nwarning" -ne 0 ]; then
+    echo "Warning: $nwarning monitor(s) seem down"
+    return_code=$NAGIOS_WARNING
+elif [ "$nunknown" -ne 0 ]; then
+    echo "Unknown: $nunknown monitor(s) are unknown"
+    return_code=$NAGIOS_UNKNOWN
+else
+    echo "Ok: All monitors are ok"
+fi
+
+# Print messages
+
+for message in "${messages[@]}"; do
+    echo "$message"
+done
+
+exit $return_code
