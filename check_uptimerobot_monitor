@@ -2,24 +2,24 @@
 
 # check_uptimerobot_monitor Checks UptimeRobot monitor status
 # Copyright (C) 2024 Ramón Román Castro <ramonromancastro@gmail.com>
-# 
+#
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
 # the Free Software Foundation, either version 3 of the License, or
 # (at your option) any later version.
-# 
+#
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 # GNU General Public License for more details.
-# 
+#
 # You should have received a copy of the GNU General Public License
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 # Constants
 
-PLUGIN_VERSION=0.3
-API_MONITOR_URL="https://api.uptimerobot.com/v2/getMonitors"
+PLUGIN_VERSION=0.5
+API_MONITOR_URL="https://api.uptimerobot.com/v3/monitors"
 NAGIOS_OK=0
 NAGIOS_WARNING=1
 NAGIOS_CRITICAL=2
@@ -80,7 +80,7 @@ done
 # Make the POST request and capture the response
 
 verb "Retrieving monitor information from UptimeRobot"
-response=$(curl -s -w "%{http_code}" -X POST -H "Content-Type: application/x-www-form-urlencoded" -H "Cache-Control: no-cache" -d "api_key=$api_key&format=json$monitor_id" "$API_MONITOR_URL")
+response=$(curl -s -w "%{http_code}" -X GET -H 'accept: application/json' -H "authorization: Bearer $api_key" "$API_MONITOR_URL")
 http_code="${response: -3}"
 json="${response:0:${#response}-3}"
 
@@ -91,23 +91,24 @@ if [ "$http_code" -eq 200 ]; then
 
     while IFS= read -r line; do
         monitors+=("$line")
-    done < <(echo "$json" | jq -r '.monitors[] | "\(.url) \(.status)"' | sort)
+    done < <(echo "$json" | jq -r '.data[] | "\(.url)\t\(.status)\t\(.friendlyName)"' | sort)
 
     # Loop through the array
 
     for entry in "${monitors[@]}"; do
-        url=$(echo "$entry" | awk '{print $1}')
-        status=$(echo "$entry" | awk '{print $2}')
-        verb "Processing $url"
+        url=$(echo "$entry" | awk -F "\t" '{print $1}')
+        status=$(echo "$entry" | awk -F "\t" '{print $2}')
+        friendlyName=$(echo "$entry" | awk -F "\t" '{print $3}')
+        verb "Processing $friendlyName ($url)"
         case $status in
-            0) messages+=("Paused: $url") ;;
-            1) messages+=("Not checked yet: $url") ;;
-            2) messages+=("Ok: $url") ;;                     
-            8) nwarning=$((nwarning + 1)); messages+=("Seems down: $url") ;;
-            9) ncritical=$((ncritical + 1)); messages+=("Down: $url") ;;
-            *) nunknown=$((nunknown + 1)); messages+=("Unknown: $url") ;;
+            'PAUSED') messages+=("Paused: $friendlyName ($url)") ;;
+            'STARTED') messages+=("Not checked yet: $friendlyName ($url)") ;;
+            'UP') messages+=("Ok: $friendlyName ($url)") ;;
+            'LOOKS_DOWN') nwarning=$((nwarning + 1)); messages+=("Seems down: $friendlyName ($url)") ;;
+            'DOWN') ncritical=$((ncritical + 1)); messages+=("Down: $friendlyName ($url)") ;;
+            *) nunknown=$((nunknown + 1)); messages+=("Unknown: $status $friendlyName ($url)") ;;
         esac
-    done   
+    done
 elif [ "$http_code" -eq 429 ]; then
     echo "Unknown: Rate limit reached"
     exit $NAGIOS_UNKNOWN
